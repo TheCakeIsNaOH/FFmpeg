@@ -792,6 +792,7 @@ static enum AVPixelFormat get_pixel_format(H264Context *h, int force_callback)
 #define HWACCEL_MAX (CONFIG_H264_DXVA2_HWACCEL + \
                      (CONFIG_H264_D3D11VA_HWACCEL * 2) + \
                      CONFIG_H264_NVDEC_HWACCEL + \
+                     CONFIG_H264_V4L2REQUEST_HWACCEL + \
                      CONFIG_H264_VAAPI_HWACCEL + \
                      CONFIG_H264_VIDEOTOOLBOX_HWACCEL + \
                      CONFIG_H264_VDPAU_HWACCEL)
@@ -821,10 +822,17 @@ static enum AVPixelFormat get_pixel_format(H264Context *h, int force_callback)
                 *fmt++ = AV_PIX_FMT_GBRP10;
             } else
                 *fmt++ = AV_PIX_FMT_YUV444P10;
-        } else if (CHROMA422(h))
+        } else if (CHROMA422(h)) {
+#if CONFIG_H264_V4L2REQUEST_HWACCEL
+            *fmt++ = AV_PIX_FMT_DRM_PRIME;
+#endif
             *fmt++ = AV_PIX_FMT_YUV422P10;
-        else
+        } else {
+#if CONFIG_H264_V4L2REQUEST_HWACCEL
+            *fmt++ = AV_PIX_FMT_DRM_PRIME;
+#endif
             *fmt++ = AV_PIX_FMT_YUV420P10;
+        }
         break;
     case 12:
         if (CHROMA444(h)) {
@@ -859,6 +867,9 @@ static enum AVPixelFormat get_pixel_format(H264Context *h, int force_callback)
         if (h->avctx->colorspace != AVCOL_SPC_RGB)
             *fmt++ = AV_PIX_FMT_VIDEOTOOLBOX;
 #endif
+#if CONFIG_H264_V4L2REQUEST_HWACCEL
+            *fmt++ = AV_PIX_FMT_DRM_PRIME;
+#endif
         if (CHROMA444(h)) {
             if (h->avctx->colorspace == AVCOL_SPC_RGB)
                 *fmt++ = AV_PIX_FMT_GBRP;
@@ -867,6 +878,9 @@ static enum AVPixelFormat get_pixel_format(H264Context *h, int force_callback)
             else
                 *fmt++ = AV_PIX_FMT_YUV444P;
         } else if (CHROMA422(h)) {
+#if CONFIG_H264_V4L2REQUEST_HWACCEL
+                *fmt++ = AV_PIX_FMT_DRM_PRIME;
+#endif
             if (h->avctx->color_range == AVCOL_RANGE_JPEG)
                 *fmt++ = AV_PIX_FMT_YUVJ422P;
             else
@@ -1838,12 +1852,12 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
     unsigned int slice_type, tmp, i;
     int field_pic_flag, bottom_field_flag;
     int first_slice = sl == h->slice_ctx && !h->current_slice;
-    int picture_structure;
+    int picture_structure, pos;
 
     if (first_slice)
         av_assert0(!h->setup_finished);
 
-    sl->first_mb_addr = get_ue_golomb_long(&sl->gb);
+    sl->idr_pic_id = get_ue_golomb_long(&sl->gb);
 
     slice_type = get_ue_golomb_31(&sl->gb);
     if (slice_type > 9) {
@@ -1927,6 +1941,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
             av_log(h->avctx, AV_LOG_WARNING, "idr_pic_id is invalid\n");
     }
 
+    pos = sl->gb.index;
     sl->poc_lsb = 0;
     sl->delta_poc_bottom = 0;
     if (sps->poc_type == 0) {
@@ -1943,6 +1958,7 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
         if (pps->pic_order_present == 1 && picture_structure == PICT_FRAME)
             sl->delta_poc[1] = get_se_golomb(&sl->gb);
     }
+    sl->pic_order_cnt_bit_size = sl->gb.index - pos;
 
     sl->redundant_pic_count = 0;
     if (pps->redundant_pic_cnt_present)
@@ -1982,9 +1998,11 @@ static int h264_slice_header_parse(const H264Context *h, H264SliceContext *sl,
 
     sl->explicit_ref_marking = 0;
     if (nal->ref_idc) {
+        pos = sl->gb.index;
         ret = ff_h264_decode_ref_pic_marking(sl, &sl->gb, nal, h->avctx);
         if (ret < 0 && (h->avctx->err_recognition & AV_EF_EXPLODE))
             return AVERROR_INVALIDDATA;
+        sl->ref_pic_marking_bit_size = sl->gb.index - pos;
     }
 
     if (sl->slice_type_nos != AV_PICTURE_TYPE_I && pps->cabac) {
